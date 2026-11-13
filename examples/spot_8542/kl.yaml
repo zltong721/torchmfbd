@@ -27,7 +27,7 @@ optimization:
     lr_obj : 0.00
     lr_modes : 0.08
     lr_prior : 0.08
-    loss_type: marginal
+    loss_type: joint
     stop_psd_optimization: 5
     show_object_info: False
 
@@ -41,6 +41,11 @@ psf:
     model : kl
     nmax_modes : 54
     jitter : none
+
+    regularization:
+        r0_estimation_modes : [4, 20]
+        apply_after_mode : 40
+        lambda : 1.0
 
 initialization:
     object : contrast

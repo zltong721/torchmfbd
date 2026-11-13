@@ -41,9 +41,9 @@ if __name__ == '__main__':
         decSI.add_frames(frames_patches, id_object=i, id_diversity=0, diversity=0.0)
                 
     decSI.deconvolve(infer_object=False, 
-                     optimizer='lbfgs', 
+                     optimizer='adam', 
                      simultaneous_sequences=90,
-                     n_iterations=10)
+                     n_iterations=800)
             
     obj = []
     for i in range(2):
@@ -54,7 +54,7 @@ if __name__ == '__main__':
     fig, ax = pl.subplots(nrows=2, ncols=3, figsize=(15, 10))
     for i in range(2):
         ax[i, 0].imshow(frames[0, i, 0, 0:, 0:], cmap='gray', interpolation='nearest')
-        ax[i, 1].imshow(obj[i][0, 0:, 0:], cmap='gray', interpolation='nearest')
+        ax[i, 1].imshow(obj[i][0, 0, 0:, 0:], cmap='gray', interpolation='nearest')
 
 
     decSI.update_object(cutoffs=[[0.3, 0.35], [0.3, 0.35]])
@@ -65,7 +65,7 @@ if __name__ == '__main__':
         obj.append(patchify.unpatchify(decSI.obj[i], apodization=6, weight_type='cosine', weight_params=30).cpu().numpy())        
         
     for i in range(2):
-        ax[i, 2].imshow(obj[i][0, 0:, 0:], cmap='gray', interpolation='nearest')
+        ax[i, 2].imshow(obj[i][0, 0, 0:, 0:], cmap='gray', interpolation='nearest')
 
     # Force same vmin and vmax for all images using the original images as reference:
     vmin = np.min(frames[:, :, 0, :, :].cpu().numpy())

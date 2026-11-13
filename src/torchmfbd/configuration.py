@@ -36,6 +36,9 @@ def _check_config(config):
     if "lr_obj" not in config["optimization"]:
         config["optimization"]["lr_obj"] = 0.01
 
+    if "scheduler" not in config["optimization"]:
+        config["optimization"]["scheduler"] = "none"
+
     if "lr_modes" not in config["optimization"]:
         config["optimization"]["lr_modes"] = 0.01
     
@@ -63,8 +66,11 @@ def _check_config(config):
     if config["annealing"]["type"] not in ["sigmoid", "linear", "none"]:
         raise ValueError(f"Invalid value for annealing type. It is {config['annealing']['type']} but should be sigmoid, linear or none")
         
-    if config["psf"]["model"] not in ["zernike", "kl", "pca", "nmf", "vae"]:
-        raise ValueError(f"Invalid value for psf model. It is {config['psf']['model']} but should be zernike, kl, pca or nmf")
+    if config["psf"]["model"] not in ["zernike", "kl", "pca", "nmf", "linear_vae", "nonlinear_vae"]:
+        raise ValueError(f"Invalid value for psf model. It is {config['psf']['model']} but should be zernike, kl, pca, nmf, linear_vae or nonlinear_vae")
+
+    if "regularization" not in config["psf"]:
+        config["psf"]["regularization"] = "none"
     
     for k, v in config.items():
         if "object" in k:

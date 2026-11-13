@@ -28,7 +28,7 @@ import time
 import scipy.optimize as optim
 from astropy.io import fits
 from einops import rearrange
-from torchmfbd.vae import ConvVAE2D
+from torchmfbd.vae import ConvVAE2D, LinearVAE
 import importlib.resources
 try:
     import ncg_optimizer
@@ -189,6 +189,14 @@ class Deconvolution(object):
         if self.remove_tt:
             self.logger.info(f"Tip-tilt will be removed from the modes during optimization")
 
+        self.mode_regularization = False
+        if self.config['psf']['regularization'] != 'none':
+            self.logger.info(f"Using regularization for the PSF modes")
+            self.lambda_kol = self.config['psf']['regularization']['lambda']
+            self.r0_estimation_modes = self.config['psf']['regularization']['r0_estimation_modes']
+            self.apply_after_mode = self.config['psf']['regularization']['apply_after_mode']
+            if self.lambda_kol > 0.0:
+                self.mode_regularization = True            
        
     def _define_basis(self, n_modes=None):
 
@@ -303,7 +311,8 @@ class Deconvolution(object):
                     if found:
                         self.logger.info(f"Loading precomputed Zernike {filename}")
                         tmp = np.load(f"{filename}")
-                        basis = tmp['basis']           
+                        basis = tmp['basis']
+                        klvar = tmp['variance']
                     else:                
                         self.logger.info(f"Computing Zernike modes {filename}")
                         basis = self.precalculate_zernike(overfill=overfill)
@@ -330,7 +339,9 @@ class Deconvolution(object):
                     if found:
                         self.logger.info(f"Loading precomputed KL basis: {filename}")
                         tmp = np.load(f"{filename}")
-                        basis = tmp['basis']                
+                        basis = tmp['basis']   
+                        self.klvar = tmp['variance']
+                        self.klvar_th = torch.tensor(self.klvar.astype('float32')).to(self.device)
                     else:
                         self.logger.info(f"Computing KL modes {filename}")
                         self.kl = kl_modes.KL()
@@ -338,6 +349,8 @@ class Deconvolution(object):
                         basis = self.kl.precalculate(npix_image = self.npix, 
                                         n_modes_max = self.n_modes,                                 
                                         overfill=overfill)
+                        self.klvar = self.kl.varKL
+                        self.klvar_th = torch.tensor(self.klvar.astype('float32')).to(self.device)
                         
                         # Add piston mode if needed                        
                         if (self.add_piston):
@@ -391,9 +404,37 @@ class Deconvolution(object):
                 
                 self.logger.info(f"  * Using {self.n_modes} modes...")
 
-            if (self.psf_model.lower() == 'vae'):                
-                self.logger.info(f"PSF model: PSF expansion in VAE modes")
+            if (self.psf_model.lower() == 'linear_vae'):                
+                self.logger.info(f"PSF model: PSF expansion in linear VAE modes")
                
+# Get a Traversable path object to the file                
+                filename = importlib.resources.files("torchmfbd").joinpath("vae", "linear_matryoshka_z_200_beta_0.1.pth")
+                
+                checkpoint = torch.load(filename, map_location=lambda storage, loc: storage, weights_only=False)
+
+                self.x_vae_mean = torch.tensor(checkpoint['x_mean'].astype('float32')).to(self.device)
+                self.x_vae_std = torch.tensor(checkpoint['x_std'].astype('float32')).to(self.device)
+                latent_dim = checkpoint['latent_dim']
+                n_pixel = checkpoint['n_pixel']
+                nested_dims = checkpoint['nested_dims']
+
+                # Model and Optimizer initialization                
+                self.model_vae = LinearVAE(in_features=n_pixel**2, latent_dim=latent_dim, nested_dims=nested_dims).to(self.device)
+
+                self.model_vae.load_state_dict(checkpoint['state_dict'])
+                self.model_vae.eval()
+
+                self.logger.info(f"VAE is trained for PSFs of size {n_pixel}x{n_pixel} pixels with latent dimension {latent_dim}")
+                if n_pixel > self.npix:
+                    self.logger.info(f"PSFs will be cropped to generate PSFs of size {self.npix}x{self.npix} pixels")
+                if n_pixel < self.npix:
+                    self.logger.info(f"PSFs will be padded to generate PSFs of size {self.npix}x{self.npix} pixels")
+                
+                self.logger.info(f"Number of VAE model parameters: {sum(p.numel() for p in self.model_vae.parameters())}")
+
+            if (self.psf_model.lower() == 'nonlinear_vae'):
+                self.logger.info(f"PSF model: PSF expansion in nonlinear VAE modes")
+                
 # Get a Traversable path object to the file
                 filename = importlib.resources.files("torchmfbd").joinpath("vae", "nonlinear_matryoshka_z_200_beta_0.1.pth")
                 
@@ -407,7 +448,7 @@ class Deconvolution(object):
 
                 # Model and Optimizer initialization
                 self.model_vae = ConvVAE2D(in_channels=1, img_size=n_pixel, latent_dim=latent_dim, nested_dims=nested_dims).to(self.device)
-
+                
                 self.model_vae.load_state_dict(checkpoint['state_dict'])
                 self.model_vae.eval()
 
@@ -465,7 +506,7 @@ class Deconvolution(object):
                     self.f_x[j] = f_x
                     self.f_y[j] = f_y
                     self.diffraction_limit[j] = diffraction_limit
-
+        
         return
     
     def set_regularizations(self):
@@ -912,7 +953,11 @@ class Deconvolution(object):
         
         decoded_psfs = self.model_vae.decode(latent_codes)  # Shape: (n_seq, 1, H, W)
 
-        decoded_psfs = rearrange(decoded_psfs, '(ns nf) 1 h w -> ns nf h w', ns=n_seq)  # Reshape back to (n_seq, n_f, H, W)
+        if self.psf_model.lower() == 'nonlinear_vae':
+            decoded_psfs = rearrange(decoded_psfs, '(ns nf) 1 h w -> ns nf h w', ns=n_seq)  # Reshape back to (n_seq, n_f, H, W)
+
+        if self.psf_model.lower() == 'linear_vae':
+            decoded_psfs = rearrange(decoded_psfs, '(ns nf) (h w) -> ns nf h w', ns=n_seq, h=64)  # Reshape back to (n_seq, n_f, H, W)
 
         decoded_psfs = decoded_psfs * (self.x_vae_std + 1e-8) + self.x_vae_mean
         decoded_psfs = torch.exp(decoded_psfs + 1e-10)
@@ -2007,7 +2052,7 @@ class Deconvolution(object):
             n = max(2, (self.n_modes - 2) // 5)
             modes = np.linspace(2, self.n_modes, n).astype(int)
 
-        if self.psf_model.lower() == 'vae':
+        if self.psf_model.lower() in ['linear_vae', 'nonlinear_vae']:
             n = max(2, (self.n_modes - 2) // 5)
             modes = np.linspace(2, self.n_modes, n).astype(int)
             # modes = (self.n_modes * np.ones(n)).astype(int)
@@ -2229,7 +2274,7 @@ class Deconvolution(object):
                         self.shift_y = torch.zeros((n_seq, self.n_f), device=self.device, requires_grad=True)
 
                 # Unknowns for VAE modes
-                if self.psf_model.lower() == 'vae':
+                if self.psf_model.lower() in ['linear_vae', 'nonlinear_vae']:
                     self.logger.info(f"Initializing VAE modes with random values...")
                     modes = torch.randn((n_seq, self.n_f, self.n_modes), device=self.device, requires_grad=True)
                     shift_x = torch.zeros((n_seq, self.n_f), device=self.device, requires_grad=True)
@@ -2259,7 +2304,7 @@ class Deconvolution(object):
                     parameters.append({'params': self.shift_x, 'lr': self.lr_modes})
                     parameters.append({'params': self.shift_y, 'lr': self.lr_modes})
 
-                if self.psf_model.lower() == 'vae' and self.config['psf']['shift']:
+                if self.psf_model.lower() in ['linear_vae', 'nonlinear_vae']:
                     parameters.append({'params': shift_x, 'lr': self.lr_modes})
                     parameters.append({'params': shift_y, 'lr': self.lr_modes})
 
@@ -2357,8 +2402,8 @@ class Deconvolution(object):
             
             self.logger.info(f"Starting optimization with {n_iterations} iterations...")
             self.logger.info(f"Learning rates: modes {self.lr_modes} - object {self.lr_obj if infer_object else 'N/A'} - psd prior {self.lr_prior if not infer_object and self.loss_type == 'marginal' else 'N/A'}")
-                
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, 3*n_iterations)
+            
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_iterations, eta_min=0.1*self.lr_modes)
 
             losses = torch.zeros(n_iterations, device=self.device)
 
@@ -2370,7 +2415,7 @@ class Deconvolution(object):
             if self.psf_model.lower() == 'nmf':
                 n_active = self.n_modes
 
-            if self.psf_model.lower() == 'vae':
+            if self.psf_model.lower() in ['linear_vae', 'nonlinear_vae']:
                 n_active = self.n_modes
 
             modes_previous = modes.clone().detach()
@@ -2401,7 +2446,7 @@ class Deconvolution(object):
                     if self.psf_model.lower() == 'nmf':
                         psf, otf = self.compute_psfs_nmf(modes[..., 0:n_active])
 
-                    if self.psf_model.lower() == 'vae':
+                    if self.psf_model.lower() in ['linear_vae', 'nonlinear_vae']:
 
                         # Remove the tip-tilt of the first frame of each sequence to avoid degeneracy in the optimization
                         shift_x_centered = shift_x.clone()
@@ -2463,6 +2508,16 @@ class Deconvolution(object):
                     loss_obj = torch.tensor(0.0).to(self.device)
                     for index in self.index_regularization['object']:
                         loss_obj += self.regularization[index](obj_filter)
+
+                    # Mode regularization
+                    if self.mode_regularization:
+                        x0 = self.r0_estimation_modes[0]
+                        x1 = self.r0_estimation_modes[1]
+                        if n_active > x0 and n_active < self.apply_after_mode:
+                            self.s = torch.mean(modes[:, :, x0:x1].detach()**2 / self.klvar_th[None, None, x0:x1])
+
+                        if n_active > self.apply_after_mode:
+                            loss += torch.mean(modes[:, :, :]**2 / (2.0 * self.s * self.klvar_th[None, None, :]))
                     
                     # Total loss
                     loss += loss_obj
@@ -2502,6 +2557,9 @@ class Deconvolution(object):
                 if self.show_object_info:
                     obj_filter = self.obj_filter_local
 
+                if self.config['optimization']['scheduler'] == 'cosine':
+                    scheduler.step()
+
                 # Reduce the learning rate of the PSD parameters
                 # if self.loss_type == 'marginal':
                     # opt.param_groups[1]['lr'] *= 0.99                                
@@ -2519,6 +2577,11 @@ class Deconvolution(object):
 
                 delta_modes = torch.mean(torch.abs(modes.detach() - modes_previous))
 
+                if self.mode_regularization and n_active > 10:
+                    r0 = self.config['telescope']['diameter'] / self.s**(3/5.)                    
+                else:
+                    r0 = 0.0
+                    
                 modes_previous = modes.clone().detach()
 
                 tmp['active'] = f'{n_active}'
@@ -2544,6 +2607,7 @@ class Deconvolution(object):
                 if self.use_jitter == 'slow':
                     tmp['px'] = f'{torch.min((jitter_torch[:, :, :, 0])).item():6.3f}/{torch.max((jitter_torch[:, :, :, 0])).item():6.3f}'
                     tmp['py'] = f'{torch.min((jitter_torch[:, :, :, 1])).item():6.3f}/{torch.max((jitter_torch[:, :, :, 1])).item():6.3f}'
+                tmp['r0'] = f'{r0:6.3f}'
                 tmp['L'] = f'{loss.detach().item():8.6f}'
                 t.set_postfix(ordered_dict=tmp)
                 
@@ -2566,7 +2630,7 @@ class Deconvolution(object):
             if self.psf_model.lower() == 'nmf':
                 psf, otf = self.compute_psfs_nmf(modes)
 
-            if self.psf_model.lower() == 'vae':
+            if self.psf_model.lower() in ['linear_vae', 'nonlinear_vae']:
                 shift_x_centered = shift_x.clone()
                 shift_y_centered = shift_y.clone()
                 shift_x_centered = shift_x_centered - shift_x[:, 0:1]

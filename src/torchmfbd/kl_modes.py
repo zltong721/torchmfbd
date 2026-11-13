@@ -99,7 +99,7 @@ class KL(object):
 
         # Precalculate Zernike modes
         max_jz = 0
-        for mode in range(self.n_modes_max):
+        for mode in range(self.n_modes_max+1):
             
             # Modes start at 1
             j = mode + 1
@@ -120,7 +120,7 @@ class KL(object):
         self.varKL = np.zeros((self.n_modes_max))
         
         self.logger.info("Computing KL modes")
-        for mode in tqdm(range(self.n_modes_max)):
+        for mode in tqdm(range(self.n_modes_max+1)):
             
             # Modes start at 1
             j = mode + 1
@@ -138,7 +138,8 @@ class KL(object):
 
                 self.KL[mode,:,:] += cz * zernikes[jz - 1, :, :] * aperture_mask
             
-            self.varKL[mode] = self.KL_variance[j-1]
+            if mode < self.n_modes_max:
+                self.varKL[mode] = self.KL_variance[j-1]
 
         # Now remove the piston mode that we never use
         # The variances do not include piston

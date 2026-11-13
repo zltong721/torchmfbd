@@ -41,7 +41,7 @@ if __name__ == '__main__':
     decSI.deconvolve(infer_object=False, 
                      optimizer='adam', 
                      simultaneous_sequences=120,
-                     n_iterations=250)
+                     n_iterations=350)
 
 
     decSI2 = torchmfbd.Deconvolution('kl.yaml')

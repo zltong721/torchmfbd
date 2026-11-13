@@ -8,6 +8,7 @@ from tqdm import tqdm
 from einops import rearrange, repeat
 from collections import OrderedDict
 
+
 def destretch(frames,             
               ngrid=32, 
               lr=0.01,
@@ -203,6 +204,7 @@ def align(frames,
         mode (str, optional): Interpolation mode for the warping. Default is 'bilinear' ('nearest'/'bilinear').        
         padding_mode (str, optional): Padding mode for the warping. Default is 'reflection' ('zeros'/'border'/'reflection').
         no_shear (bool, optional): If True, only optimize for rotation and translation (no shear). Default is False.
+        no_rotation (bool, optional): If True, only optimize for translation (no rotation). Default is False.
     Returns:
         tuple: A tuple containing:
             - warped (torch.Tensor): Warped frames after alignment.
@@ -222,13 +224,13 @@ def align(frames,
         affine[:, 0, 0] = 1.0
         affine[:, 1, 1] = 1.0
         affine = torch.tensor(affine, device=device, requires_grad=True)        
-        optimizer = torch.optim.Adam([pars], lr=lr)
+        optimizer = torch.optim.AdamW([pars], lr=lr)
     else:        
         affine = np.zeros((1, 2, 3), dtype=np.float32)
         affine[:, 0, 0] = 1.0
         affine[:, 1, 1] = 1.0
         affine = torch.tensor(affine, device=device, requires_grad=True)        
-        optimizer = torch.optim.Adam([affine], lr=lr)
+        optimizer = torch.optim.AdamW([affine], lr=lr)
 
     # Reference frame
     ir = frames[0:1, :, :]
@@ -237,6 +239,8 @@ def align(frames,
     ir = ir - torch.mean(ir, keepdim=True, dim=(-1, -2))
     
     t = tqdm(range(n_iterations))
+
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, n_iterations, eta_min=0.1*lr)
     
     for loop in t:
 
@@ -244,10 +248,15 @@ def align(frames,
 
         if no_shear:
             affine = torch.zeros((1, 2, 3), dtype=torch.float32, device=device)
-            affine[:, 0, 0] = torch.cos(pars[0])
-            affine[:, 0, 1] = -torch.sin(pars[0])
-            affine[:, 1, 0] = torch.sin(pars[0])
-            affine[:, 1, 1] = torch.cos(pars[0])
+            if not no_rotation:
+                affine[:, 0, 0] = torch.cos(pars[0])
+                affine[:, 0, 1] = -torch.sin(pars[0])
+                affine[:, 1, 0] = torch.sin(pars[0])
+                affine[:, 1, 1] = torch.cos(pars[0])
+            else:
+                affine[:, 0, 0] = 1.0
+                affine[:, 1, 1] = 1.0
+
             affine[:, 0, 2] = pars[1]
             affine[:, 1, 2] = pars[2]
                 
@@ -271,10 +280,13 @@ def align(frames,
         loss = torch.mean(loss)
                         
         loss.backward()
-
+        
         optimizer.step()
 
+        scheduler.step()
+
         tmp = OrderedDict()        
+        tmp['lr'] = f'{scheduler.get_last_lr()[0]:8.6f}'
         tmp['L'] = f'{loss.item():8.6f}'
         
         t.set_postfix(ordered_dict = tmp)
