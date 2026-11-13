@@ -14,6 +14,7 @@ __pycache__/
 *.png
 *.gif
 *.pdf
+*.pth
 
 # Distribution / packaging
 .Python
